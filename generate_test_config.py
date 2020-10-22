@@ -10,4 +10,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     ServerClusterConfig.generate_test_config(args.f, args.c)
     config = ServerClusterConfig.read_config(args.c)
+    print(config.get_all_replica_ip_port())
     pass
