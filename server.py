@@ -5,6 +5,7 @@ from config import ServerConfig, ServerClusterConfig
 
 
 class ChatMessage(object):
+    # TODO serializable, deserializable, messageType(ACK, CHAT, PRINT lOG, HEARTBEAT etc)
     def __init__(self, uid=None, message=None):
         self.uid = uid
         self.message = message
