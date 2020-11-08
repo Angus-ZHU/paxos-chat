@@ -18,7 +18,7 @@ def propose_worker_wrapper(func):
         p.join(self.get_default_timeout())
         if p.is_alive():
             p.terminate()
-            self.result_queue.put((proposal.slot, False))
+            self.result_queue.put((proposal, False))
 
     @wraps(func)
     def outer_wrap(self, proposal: Proposal):
@@ -95,22 +95,22 @@ class Server(object):
             new_uid = message_queue.get()
             if new_uid not in accepted_uid:
                 accepted_uid.append(new_uid)
-        delivered_messages = self.state.learn_operation(proposal.slot, proposal.operation)
-        if delivered_messages is not None:
-            for i in delivered_messages:
-                self.result_queue.put((i, True))
+        delivered_proposals = self.state.learn_operation(proposal.slot, proposal.operation)
+        for proposal in delivered_proposals:
+            self.result_queue.put((proposal, True))
 
     def reply_client_worker(self):
         while True:
-            delivered_slot, success = self.result_queue.get()
-            operation = self.state.get_learned_operation(delivered_slot)
-            reply = ClientReply(success, operation)
-            self.send_one(operation.client_address, reply)
+            proposal, success = self.result_queue.get()
+            reply = ClientReply(success, proposal.operation)
+            self.send_one(proposal.operation.client_address, reply)
 
     def handle_accept(self, accept: Accept):
-        if accept.proposal.slot in self.message_queues:
-            queue = self.message_queues[accept.proposal.slot]
-            queue.put(accept.uid)
+        if accept.proposal.slot not in self.message_queues:
+            new_queue = Queue()
+            self.message_queues[accept.proposal.slot] = new_queue
+        queue = self.message_queues[accept.proposal.slot]
+        queue.put(accept.uid)
 
     def reply_heartbeat(self, address):
         heartbeat = HeartBeat(self.uid, need_reply=False)
@@ -120,8 +120,9 @@ class Server(object):
         slot = self.state.propose_operation(message.operation)
         proposal = Proposal(self.uid, slot, message.operation)
         # create new queue
-        new_queue = self.manager.Queue()
-        self.message_queues[slot] = new_queue
+        if slot not in self.message_queues:
+            new_queue = self.manager.Queue()
+            self.message_queues[slot] = new_queue
         self.propose_worker(proposal)
 
     def master_dispatcher(self):
@@ -149,18 +150,33 @@ class Server(object):
         p.start()
         self.master_dispatcher()
 
+    def replica_learner(self, proposal: Proposal):
+        message_queue = self.message_queues[proposal.slot]
+        accepted_uid = []
+        while len(accepted_uid) < self.get_f():
+            new_uid = message_queue.get()
+            if new_uid not in accepted_uid:
+                accepted_uid.append(new_uid)
+        self.state.learn_operation(proposal.slot, proposal.operation)
+
     def handle_proposal(self, proposal: Proposal):
         if self.state.master_uid == proposal.master_uid:
             if self.state.can_accept_operation(proposal.slot):
                 self.state.accept_operation(proposal.slot, proposal.operation)
                 accept_message = Accept(self.uid, proposal)
-                self.send_one(self.get_master_address(), accept_message)
+                self.send_all(accept_message)
+                if proposal.slot not in self.message_queues:
+                    self.message_queues[proposal.slot] = Queue()
+                p = Process(target=self.replica_learner, args=(proposal,))
+                p.start()
 
     def replica_dispatcher(self):
         while True:
             message, address = self._receive()
             if isinstance(message, Proposal):
                 self.handle_proposal(message)
+            if isinstance(message, Accept):
+                self.handle_accept(message)
             elif isinstance(message, InitMessage):
                 # todo
                 pass

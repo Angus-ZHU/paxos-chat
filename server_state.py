@@ -4,7 +4,7 @@ import hashlib
 from multiprocessing import Manager
 
 from functools import wraps
-from message import Operation
+from message import Operation, Proposal
 from typing import Dict
 
 
@@ -51,13 +51,13 @@ class ServerState(object):
         else:
             self.is_master = False
 
-    def get_learned_operation(self, i):
-        if i in self.delivered_operations:
-            return self.delivered_operations[i]
-        elif i in self.learned_operation_buffer:
-            return self.learned_operation_buffer[i]
-        else:
-            return None
+    # def get_learned_operation(self, i):
+    #     if i in self.delivered_operations:
+    #         return self.delivered_operations[i]
+    #     elif i in self.learned_operation_buffer:
+    #         return self.learned_operation_buffer[i]
+    #     else:
+    #         return None
 
     @write_show_state
     def update_new_state(self, accepted: Dict[int, Operation]):
@@ -69,10 +69,9 @@ class ServerState(object):
         self.lock.release()
         return result
 
-    def get_all_accepted_operations(self) -> Dict[int, Operation]:
+    def get_all_learned_operations(self) -> Dict[int, Operation]:
         result = self.delivered_operations.copy()
         result.update(self.learned_operation_buffer.copy())
-        result.update(self.accepted_operation_buffer.copy())
         return result
 
     def execute(self, lock_acquired=False):
@@ -87,8 +86,10 @@ class ServerState(object):
             if k in self.delivered_operations:
                 continue
             if k in self.learned_operation_buffer:
-                self.delivered_operations[k] = self.learned_operation_buffer.pop(k)
-                result.append(k)
+                operation = self.learned_operation_buffer.pop(k)
+                self.delivered_operations[k] = operation
+                proposal = Proposal(self.uid, k, operation)
+                result.append(proposal)
             else:
                 break
 
@@ -109,7 +110,6 @@ class ServerState(object):
         self.lock.release()
         return slot
 
-    @write_show_state
     def accept_operation(self, slot, operation: Operation):
         self.lock.acquire()
         if self.can_accept_operation(slot):
@@ -120,7 +120,6 @@ class ServerState(object):
 
     @write_show_state
     def learn_operation(self, slot, operation: Operation):
-        # only called by proposer
         if slot in self.accepted_operation_buffer and self.accepted_operation_buffer[slot] == operation:
             self.lock.acquire()
             self.accepted_operation_buffer.pop(slot, 'None')
@@ -145,13 +144,13 @@ class ServerState(object):
     #         f.write(jsonpickle.encode(self))
 
     def digest_state(self):
-        # print("Sanity Check: %s" % self.get_all_accepted_operations())
+        print("Sanity Check: %s" % self.get_all_learned_operations())
 
-        print('Hash Sanity Check-%s: %s' % (
-            self.uid, hashlib.sha1(
-                  jsonpickle.encode(self.get_all_accepted_operations()).encode()
-            ).hexdigest()
-        ))
+        # print('Hash Sanity Check-%s: %s' % (
+        #     self.uid, hashlib.sha1(
+        #           jsonpickle.encode(self.get_all_learned_operations()).encode()
+        #     ).hexdigest()
+        # ))
 
     # @classmethod
     # def restore_state(cls, uid):
