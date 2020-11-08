@@ -1,157 +1,191 @@
-import sys
-import hashlib
-import jsonpickle
-from config import ServerConfig, ServerClusterConfig
+import argparse
+import random
+import socket
+from functools import wraps
+from config import ServerClusterConfig
+from multiprocessing import Pool, Queue, Process, Manager
+from message import *
+from server_state import ServerState
+
+MAX_PACKAGE_LENGTH = 4096
 
 
-class ChatMessage(object):
-    # TODO serializable, deserializable, messageType(ACK, CHAT, PRINT lOG, HEARTBEAT etc)
-    def __init__(self, uid=None, message=None):
-        self.uid = uid
-        self.message = message
+def propose_worker_wrapper(func):
+    def timeout_wrap(self, proposal: Proposal):
+        p = Process(target=func, args=(self, proposal))
+        p.daemon = True
+        p.start()
+        p.join(self.get_default_timeout())
+        if p.is_alive():
+            p.terminate()
+            self.result_queue.put((proposal.slot, False))
 
-    def if_nop(self):
-        return self.uid is None
+    @wraps(func)
+    def outer_wrap(self, proposal: Proposal):
+        p = Process(target=timeout_wrap, args=(self, proposal))
+        p.start()
+        # start the worker and move on
 
-
-class Proposal(object):
-    def __init__(self, slot, message: ChatMessage):
-        self.slot = slot
-        self.message = message
-
-
-class ServerState(object):
-    def __init__(self, uid, skip_slots=None):
-        self.modulo = 0
-        self.uid = uid
-        self.messages = {}
-        if skip_slots is None:
-            self.skip_slots = []
-        else:
-            self.skip_slots = skip_slots
-        for slot in self.skip_slots:
-            self.messages[slot] = ChatMessage()
-
-        # in case slot 0 is in skip_slots
-        self.slot_pointer = -1
-        self.increment_slot_pointer()
-        self.write_state()
-        self.digest_message()
-
-    def increment_slot_pointer(self):
-        self.slot_pointer += 1
-        while self.slot_pointer in self.skip_slots:
-            self.slot_pointer += 1
-
-    def can_accept_message(self, slot):
-        # skip slots are occupied with None in __init__
-        return slot not in self.messages
-
-    def accept_message(self, slot, message: ChatMessage):
-        if self.can_accept_message(slot):
-            self.messages[slot] = message
-        else:
-            sys.stderr.write('Fatal: accepting message with conflicting slot')
-        # Persistent
-        self.write_state()
-        # Sanity Check
-        self.digest_message()
-
-    def write_state(self):
-        filename = 'state_%s.json' % self.uid
-        with open(filename, 'w') as f:
-            f.write(jsonpickle.encode(self))
-
-    def digest_message(self):
-        print('Hash Sanity Check: %s' %
-                  hashlib.sha1(
-                      jsonpickle.encode(self.messages).encode()
-                  ).hexdigest()
-              )
-
-    @classmethod
-    def restore_state(cls, uid):
-        filename = 'state_%s.json' % uid
-        return jsonpickle.decode(open(filename).read())
+    return outer_wrap
 
 
 class Server(object):
-    def __init__(self, uid, cluster_config: ServerClusterConfig):
+    def __init__(self, uid, config: ServerClusterConfig, view_modulo=0, skip_slots=None):
         self.uid = uid
-        self.config = cluster_config
-        self.master_uid = 0
-        self.is_master = False
-        self.state = ServerState(self.uid)
+        self.config = config
+        self.view_modulo = view_modulo
 
-        if self.uid == 0:
-            self.master = True
+        self.state = ServerState(self.uid, skip_slots=skip_slots)
 
-    @staticmethod
-    def is_replicate_ping(message):
-        return False
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(config.get_address(uid))
 
-    def reply_replicate_ping(self, message):
-        # todo
-        pass
+        self.manager = Manager()
+        self.message_queues = {}
+        self.result_queue = self.manager.Queue()
 
-    def receive_from_client(self):
-        while True:
-            # todo: block until we have a message from client
-            message = ChatMessage()
-            # replicate ping are replied and
-            if self.is_replicate_ping(message):
-                self.reply_replicate_ping(message)
-            else:
-                return message
+    def get_f(self):
+        return self.config.f
 
-    def reply_to_client(self, success=True):
-        # todo:
-        if success:
-            pass
+    def get_default_timeout(self):
+        return self.config.timeout
+
+    def get_master_address(self):
+        return self.config.get_address(self.state.master_uid)
+
+    def get_message_loss(self):
+        return self.config.get_message_loss(self.uid)
+
+    def get_addresses(self):
+        return self.config.get_all_replica_ip_port(self_uid=self.uid)
+
+    def _send(self, address, byte: bytes):
+        if random.uniform(0, 1) < self.get_message_loss():
+            # message loss
+            return
+        self.socket.sendto(byte, address)
+
+    def send_one(self, address, message: BaseMessage):
+        self._send(address, str(message).encode("utf-8"))
+
+    def send_all(self, message: BaseMessage):
+        msg = str(message).encode("utf-8")
+        for address in self.get_addresses():
+            self._send(address, msg)
+
+    def _receive(self):
+        message = None
+        while message is None:
+            raw, address = self.socket.recvfrom(MAX_PACKAGE_LENGTH)
+            message = jsonpickle.decode(raw.decode("utf-8"))
+        return message, address
+
+    def dispatcher(self):
+        if self.state.is_master:
+            self.master_dispatcher()
         else:
-            pass
+            self.replica_dispatcher()
 
-    def propose_value(self, message):
-        # todo
-        # propose to replica, wait for f replies
-        pass
+    @propose_worker_wrapper
+    def propose_worker(self, proposal: Proposal):
+        self.send_all(proposal)
+        message_queue = self.message_queues[proposal.slot]
+        accepted_uid = []
+        while len(accepted_uid) < self.get_f():
+            new_uid = message_queue.get()
+            if new_uid not in accepted_uid:
+                accepted_uid.append(new_uid)
+        delivered_messages = self.state.learn_operation(proposal.slot, proposal.operation)
+        if delivered_messages is not None:
+            for i in delivered_messages:
+                self.result_queue.put((i, True))
+
+    def reply_client_worker(self):
+        while True:
+            delivered_slot, success = self.result_queue.get()
+            operation = self.state.get_learned_operation(delivered_slot)
+            reply = ClientReply(success, operation)
+            self.send_one(operation.client_address, reply)
+
+    def handle_accept(self, accept: Accept):
+        if accept.proposal.slot in self.message_queues:
+            queue = self.message_queues[accept.proposal.slot]
+            queue.put(accept.uid)
+
+    def reply_heartbeat(self, address):
+        heartbeat = HeartBeat(self.uid, need_reply=False)
+        self.send_one(address, heartbeat)
+
+    def handle_client_request(self, message: ClientRequest):
+        slot = self.state.propose_operation(message.operation)
+        proposal = Proposal(self.uid, slot, message.operation)
+        # create new queue
+        new_queue = self.manager.Queue()
+        self.message_queues[slot] = new_queue
+        self.propose_worker(proposal)
+
+    def master_dispatcher(self):
+        while True:
+            message, address = self._receive()
+            if isinstance(message, ClientRequest):
+                # print("get client request")
+                message.operation.client_address = address
+                self.handle_client_request(message)
+            elif isinstance(message, Accept):
+                self.handle_accept(message)
+            elif isinstance(message, IAmLeader):
+                # todo:
+                pass
+            elif isinstance(message, InitMessage):
+                # todo:
+                pass
+            elif isinstance(message, HeartBeat):
+                if message.need_reply:
+                    self.reply_heartbeat(address)
+            # ignore all other messages
 
     def master_main(self):
-        message = self.receive_from_client()
-        if self.propose_value(message=message):
-            self.reply_to_client(success=True)
-        else:
-            self.reply_to_client(success=False)
+        p = Process(target=self.reply_client_worker)
+        p.start()
+        self.master_dispatcher()
 
-    def promote_to_master(self):
-        # todo
-        pass
+    def handle_proposal(self, proposal: Proposal):
+        if self.state.master_uid == proposal.master_uid:
+            if self.state.can_accept_operation(proposal.slot):
+                self.state.accept_operation(proposal.slot, proposal.operation)
+                accept_message = Accept(self.uid, proposal)
+                self.send_one(self.get_master_address(), accept_message)
 
-    def ping_master(self):
-        master_address = self.config.get_master_address()
-        # todo ping master
-        pass
-        ping_success = True
-        if ping_success:
-            return
-        else:
-            self.promote_to_master()
-
-    def receive_proposal(self):
-        # todo receive proposal from master
-        proposal = Proposal(0, ChatMessage())
-        return proposal
+    def replica_dispatcher(self):
+        while True:
+            message, address = self._receive()
+            if isinstance(message, Proposal):
+                self.handle_proposal(message)
+            elif isinstance(message, InitMessage):
+                # todo
+                pass
 
     def replica_main(self):
-
+        self.replica_dispatcher()
 
     def main(self):
-        if self.is_master:
+        if self.state.is_master:
+            print("master")
             self.master_main()
         else:
+            print("replica")
             self.replica_main()
 
 
+parser = argparse.ArgumentParser(description='Start a new client')
+parser.add_argument('-c', default='config.json', type=str, help='the config filename')
+parser.add_argument('-uid', default=1, type=int, help='server id')
+parser.add_argument('-skip_slots', default=None, type=str, help='skip slots in the form of 1,2,3,4')
 
 if __name__ == '__main__':
-    pass
+    args = parser.parse_args()
+    # either this is the original master or the skip_slots is None
+    assert args.uid == 0 or args.skip_slots is None
+    config = ServerClusterConfig.read_config(args.c)
+    server = Server(args.uid, config, skip_slots=args.skip_slots)
+    server.main()

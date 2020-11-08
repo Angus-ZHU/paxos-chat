@@ -1,117 +1,85 @@
+import argparse
+import sys
 import time
+import random
+import secrets
+import jsonpickle
 from multiprocessing import Process
-import threading
 import socket
-import util
-from server import ChatMessage
+from message import *
+from config import ServerClusterConfig
 
-# import socket
-#
-# sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# sock.bind()
-# sock.recv()
-# sock.send()
+MAX_PACKAGE_LENGTH = 4096
+
 
 class Client(object):
 
-    def __init__(self, replicas_address: list[tuple], msg_list: list, p=0.0):
-        self.p = p
-        self.replicas_address = replicas_address
-        self.msg_list = msg_list
-        self.uid = 0
-        self.lock = threading.Lock()
-        self.last_send_time = 0
+    def __init__(self, config: ServerClusterConfig, timeout=1.0, message_loss=0.0):
+        self.message_loss = message_loss
+        self.timeout = timeout
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("", 0))
+        self.addresses = config.get_all_replica_ip_port()
 
-    def run(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            # Send the first message to each node
-            self.send_to_all(s)
-            self.last_send_time = time.time()
-            t_timeout_resend = threading.Thread(target=self.time_out_resend, args = (s, ))
-            t_timeout_resend.daemon = True
-            t_timeout_resend.start()
-            t_receive = threading.Thread(target=self.receive, args = (s, ))
-            t_receive.start()
-            t_receive.join()
+    def _send(self, address, byte: bytes):
+        if random.uniform(0, 1) < self.message_loss:
+            # message loss
+            return
+        self.socket.sendto(byte, address)
 
-    def receive(self, s):
+    def send_all(self, message: BaseMessage):
+        msg = str(message).encode("utf-8")
+        for address in self.addresses:
+            self._send(address, msg)
+
+    def _receive(self) -> ClientReply:
+        message = None
+        while message is None:
+            # print(self.socket.getsockname())
+            raw, address = self.socket.recvfrom(MAX_PACKAGE_LENGTH)
+            message = jsonpickle.decode(raw.decode("utf-8"))
+        assert isinstance(message, ClientReply)
+        return message
+
+    def worker(self):
+        uid = secrets.token_hex(16)
+        body = secrets.token_urlsafe(16)
+        print("requesting message: {uid: %s, message: %s}" % (uid, body))
+        operation = Operation(uid, body)
+        request = ClientRequest(operation)
+        self.send_all(request)
+        reply = self._receive()
+        # print(reply)
+        if operation == reply.operation:
+            if reply.success:
+                print("message send success")
+            else:
+                print("message send failed")
+        else:
+            sys.stderr.write("Error: Client receiving random reply")
+
+    def main(self):
         while True:
-            msg, master_address = util.msg_receive(s)
-            if not msg:
-                continue
+            p = Process(target=self.worker)
+            p.start()
+            p.join(self.timeout)
+            if p.is_alive():
+                p.terminate()
+                print("message send timeout")
 
-            # Deserialize the message
-            chat_message = ChatMessage.deserilize(msg)
 
-            # If it's not an ack message or the uid not equal to current uid, ignore it
-            if chat_message.type is not ACK or chat_message.uid != self.uid:
-                continue
+parser = argparse.ArgumentParser(description='Start a new client')
+parser.add_argument('-c', default='config.json', type=str, help='the config filename')
+parser.add_argument('-loss', default=0.0, type=float, help='random percentage to loss message')
+parser.add_argument('-timeout', default=5, type=float, help='timeout in seconds')
 
-            self.lock.acquire()
 
-            self.uid += 1
-            if self.uid >= len(self.msg_list):
-                break
-
-            util.msg_send(s, master_address, self.msg_list[self.uid])
-            self.last_send_time = time.time()
-
-            self.lock.release()
-
-    # Client has to send to all replicas since master could die
-    def send_to_all(self, s):
-        for replica_address in self.replicas_address:
-            util.msg_send(s, replica_address, self.msg_list[self.uid])
-
-    def time_out_resend(self, s):
-        while True:
-            self.lock.acquire()
-
-            if time.time() - self.last_send_time < 10:
-                continue
-            self.send_to_all(s)
-
-            self.lock.release()
-            time.sleep(2)
+if __name__ == '__main__':
+    args = parser.parse_args()
+    config = ServerClusterConfig.read_config(args.c)
+    client = Client(config, args.timeout, args.loss)
+    client.main()
 
 
 
-
-
-
-
-
-
-#
-#
-# def send_request():
-#     pass
-#
-#
-# def _receive_message_implementation():
-#     valid = False
-#     from_id = None
-#     return from_id
-#
-#
-# def _receive_message_worker(threshold=0):
-#     received_id = []
-#     while len(received_id) < threshold:
-#         from_id = _receive_message_implementation()
-#         if from_id is not None and from_id not in received_id:
-#             received_id.append(from_id)
-#
-#
-# def receive_message(threshold=0, timeout=100):
-#     t = Process(target=_receive_message_worker, args=(threshold,))
-#
-#     t.start()
-#     t.join(timeout)
-#     if t.is_alive():
-#         t.terminate()
-#         # timeout happened
-#         return False
-#     else:
-#         # success
-#         return True
 
