@@ -47,26 +47,27 @@ class Client(object):
         operation = Operation(uid, body)
         request = ClientRequest(operation)
         self.send_all(request)
-        reply = self._receive()
-        # print(reply)
-        if operation == reply.operation:
-            if reply.success:
-                print("message send success")
+        while True:
+            print("waiting for reply")
+            reply = self._receive()
+            # print(reply)
+            if operation == reply.operation:
+                if reply.success:
+                    print("message send success")
+                    return
+                else:
+                    print("message send failed")
             else:
-                print("message send failed")
-        else:
-            reason = ""
-            if self.socket.getsockname()[1] != reply.operation.client_address[1]:
-                reason = "address mismatch"
-            if operation.uid != reply.operation.uid:
-                reason = "uid mismatch"
-            sys.stderr.write("Error: Client receiving random reply: %s" % reason)
+                reason = ""
+                if operation.uid != reply.operation.uid:
+                    reason = "uid mismatch"
+                sys.stderr.write("Error: Client receiving random reply: %s" % reason)
 
     def main(self):
         while True:
             uid = secrets.token_hex(16)
             if self.manual:
-                body = input("Give me the message!\n")
+                body = input("Input your message\n")
             else:
                 body = secrets.token_urlsafe(16)
             p = Process(target=self.worker, args=(uid, body))

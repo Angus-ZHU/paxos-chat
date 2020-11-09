@@ -137,7 +137,7 @@ class Server(object):
             if new_uid not in accepted_uid:
                 accepted_uid.append(new_uid)
         message_queue.close()
-        delivered_proposals = self.state.learn_operation(proposal.slot, proposal.operation)
+        delivered_proposals = self.state.learn_proposal(proposal)
         for proposal in delivered_proposals:
             self.result_queue.put((proposal, True))
 
@@ -145,7 +145,7 @@ class Server(object):
         while True:
             proposal, success = self.result_queue.get()
             reply = ClientReply(success, proposal.operation)
-            self.send_one(proposal.operation.client_address, reply)
+            self.send_one(proposal.client_address, reply)
 
     def handle_accept(self, accept: Accept):
         if accept.proposal.slot not in self.message_queues:
@@ -161,13 +161,12 @@ class Server(object):
         heartbeat = HeartBeat(self.uid, need_reply=False)
         self.send_one(address, heartbeat)
 
-    def handle_client_request(self, message: ClientRequest):
-        slot = self.state.propose_operation(message.operation)
-        proposal = Proposal(self.uid, slot, message.operation)
+    def handle_client_request(self, message: ClientRequest, client_address):
+        proposal = self.state.propose_operation(message.operation, client_address)
         # create new queue
-        if slot not in self.message_queues:
+        if proposal.slot not in self.message_queues:
             new_queue = Queue()
-            self.message_queues[slot] = new_queue
+            self.message_queues[proposal.slot] = new_queue
         self.propose_worker(proposal)
 
     def master_dispatcher(self):
@@ -175,8 +174,7 @@ class Server(object):
             message, address = self.receive()
             if isinstance(message, ClientRequest):
                 # print("get client request")
-                message.operation.client_address = address
-                self.handle_client_request(message)
+                self.handle_client_request(message, address)
             elif isinstance(message, Accept):
                 self.handle_accept(message)
             elif isinstance(message, HeartBeat):
@@ -198,12 +196,11 @@ class Server(object):
             if new_uid not in accepted_uid:
                 accepted_uid.append(new_uid)
         message_queue.close()
-        self.state.learn_operation(proposal.slot, proposal.operation)
+        self.state.learn_proposal(proposal)
 
     def handle_proposal(self, proposal: Proposal):
         if self.state.master_uid == proposal.master_uid:
-            if self.state.can_accept_operation(proposal.slot):
-                self.state.accept_operation(proposal.slot, proposal.operation)
+            if self.state.accept_proposal(proposal):
                 accept_message = Accept(self.uid, proposal)
                 self.send_all(accept_message)
                 if proposal.slot not in self.message_queues:
@@ -224,19 +221,20 @@ class Server(object):
         return new_master_uid > self.state.master_uid or new_master_view_modulo > self.state.view_modulo
 
     def propose_any_learned_operations(self):
-        all_learned_operations = self.state.get_all_learned_operations()
+        all_learned_proposals = self.state.get_all_learned_proposals()
         # fill in no-ops
         slot = 0
-        while len(all_learned_operations):
-            if slot in all_learned_operations:
-                all_learned_operations.pop(slot)
+        while len(all_learned_proposals):
+            if slot in all_learned_proposals:
+                all_learned_proposals.pop(slot)
             else:
-                self.state.learn_operation(slot, Operation())
+                # no_ops
+                proposal = Proposal(self.uid, self.state.view_modulo, None, slot, Operation())
+                self.state.learn_proposal(proposal)
             slot += 1
-        all_learned_operations = self.state.get_all_learned_operations()
-        # print("here, ", all_learned_operations)
-        for slot in all_learned_operations:
-            proposal = Proposal(self.uid, slot, all_learned_operations[slot])
+        all_learned_proposals = self.state.get_all_learned_proposals()
+        # print("here, ", all_learned_proposals)
+        for proposal in all_learned_proposals.values():
             self.send_all(proposal)
 
     def promote_to_master(self):
@@ -273,8 +271,8 @@ class Server(object):
         print("current master %s, view %s" % (self.state.master_uid, self.state.view_modulo))
         print("following new master %s, view %s" % (master_uid, view_modulo))
         self.state.update_master_state(master_uid, view_modulo)
-        learned_operations = self.state.get_all_learned_operations()
-        you_are_leader = YouAreLeader(self.uid, learned_operations)
+        learned_proposals = self.state.get_all_learned_proposals()
+        you_are_leader = YouAreLeader(self.uid, learned_proposals)
         self.send_one(self.config.get_address(master_uid), you_are_leader)
         # time.sleep(self.get_default_timeout())
         self.main()

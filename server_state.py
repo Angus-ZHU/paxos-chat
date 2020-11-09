@@ -32,10 +32,10 @@ class ServerState(object):
         self.manager = Manager()
         self.lock = self.manager.Lock()
         self.lock_count = 0
-        # {slot: Operation}
-        self.delivered_operations = self.manager.dict()
-        self.learned_operation_buffer = self.manager.dict()
-        self.accepted_operation_buffer = self.manager.dict()
+        # {slot: Proposal}
+        self.delivered_proposals = self.manager.dict()
+        self.learned_proposal_buffer = self.manager.dict()
+        self.accepted_proposal_buffer = self.manager.dict()
         # !!!! skip_slots is only used by master
         # !!!! should lost after view change
         assert self.is_master or skip_slots is None
@@ -65,20 +65,20 @@ class ServerState(object):
             self.is_master = False
 
     @write_show_state
-    def update_new_state(self, learned: Dict[int, Operation]):
+    def update_new_state(self, learned: Dict[int, Proposal]):
         self.acquire_lock()
-        self.accepted_operation_buffer.clear()
-        self.learned_operation_buffer.clear()
-        self.learned_operation_buffer.update(learned)
+        self.accepted_proposal_buffer.clear()
+        self.learned_proposal_buffer.clear()
+        self.learned_proposal_buffer.update(learned)
         result = self.execute()
         self.release_lock()
         return result
 
-    def get_all_learned_operations(self) -> Dict[int, Operation]:
+    def get_all_learned_proposals(self) -> Dict[int, Proposal]:
         self.acquire_lock()
         result = {}
-        result.update(self.delivered_operations.copy())
-        result.update(self.learned_operation_buffer.copy())
+        result.update(self.delivered_proposals.copy())
+        result.update(self.learned_proposal_buffer.copy())
         self.release_lock()
         return result
 
@@ -90,64 +90,69 @@ class ServerState(object):
             k += 1
             if k in self.skip_slots:
                 continue
-            if k in self.delivered_operations:
+            if k in self.delivered_proposals:
                 continue
-            if k in self.learned_operation_buffer:
-                operation = self.learned_operation_buffer.pop(k)
-                self.delivered_operations[k] = operation
-                proposal = Proposal(self.uid, k, operation)
+            if k in self.learned_proposal_buffer:
+                proposal = self.learned_proposal_buffer.pop(k)
+                self.delivered_proposals[k] = proposal
                 result.append(proposal)
             else:
                 break
         self.release_lock()
         return result
 
-    def can_accept_operation(self, slot):
+    def is_empty_slot(self, slot):
         self.acquire_lock()
-        can = slot not in self.delivered_operations and \
-              slot not in self.learned_operation_buffer and \
-              slot not in self.accepted_operation_buffer and \
-              slot not in self.skip_slots
+        empty_slot = slot not in self.delivered_proposals and \
+                     slot not in self.learned_proposal_buffer and \
+                     slot not in self.accepted_proposal_buffer and \
+                     slot not in self.skip_slots
         self.release_lock()
-        return can
+        return empty_slot
 
-    def propose_operation(self, operation: Operation):
+    def _can_accept_proposal(self, proposal: Proposal):
+        can_accept = False
+        if self.is_empty_slot(proposal.slot):
+            can_accept = True
+        else:
+            self.acquire_lock()
+            if proposal.slot in self.accepted_proposal_buffer:
+                if self.accepted_proposal_buffer[proposal.slot].can_be_replaced_by(proposal):
+                    can_accept = True
+            self.release_lock()
+        return can_accept
+
+    def propose_operation(self, operation: Operation, client_address):
         self.acquire_lock()
         slot = self.get_next_available_slot()
-        self.accepted_operation_buffer[slot] = operation
+        proposal = Proposal(self.uid, self.view_modulo, client_address, slot, operation)
+        self.accepted_proposal_buffer[slot] = proposal
         self.release_lock()
-        return slot
+        return proposal
 
-    def accept_operation(self, slot, operation: Operation):
+    def accept_proposal(self, proposal: Proposal):
         self.acquire_lock()
-        if self.can_accept_operation(slot):
-            self.accepted_operation_buffer[slot] = operation
+        if self._can_accept_proposal(proposal):
+            self.accepted_proposal_buffer[proposal.slot] = proposal
+            accepted = True
         else:
-            sys.stderr.write('Fatal: accepting operation with conflicting slot')
+            accepted = False
         self.release_lock()
+        return accepted
 
     @write_show_state
-    def learn_operation(self, slot, operation: Operation):
+    def learn_proposal(self, proposal: Proposal):
         self.acquire_lock()
-        self.accepted_operation_buffer.pop(slot, 'None')
-        self.learned_operation_buffer[slot] = operation
+        self.accepted_proposal_buffer.pop(proposal.slot, 'None')
+        self.learned_proposal_buffer[proposal.slot] = proposal
         result = self.execute()
         self.release_lock()
         return result
-        # if slot in self.accepted_operation_buffer and self.accepted_operation_buffer[slot] == operation:
-        #     self.acquire_lock()
-        #     self.accepted_operation_buffer.pop(slot, 'None')
-        #     self.learned_operation_buffer[slot] = operation
-        #     result = self.execute()
-        #     self.release_lock()
-        #     return result
-        # else:
-        #     sys.stderr.write('Fatal: can not learn a not accepted operation\n')
 
     def get_next_available_slot(self):
         i = 0
         while True:
-            if self.can_accept_operation(i):
+            if self.is_empty_slot(i):
                 break
             i += 1
         return i
@@ -158,7 +163,7 @@ class ServerState(object):
     #         f.write(jsonpickle.encode(self))
 
     def digest_state(self):
-        print("Server-%s: Sanity Check: %s" % (self.uid, self.get_all_learned_operations()))
+        print("Server-%s: Sanity Check: %s" % (self.uid, self.get_all_learned_proposals()))
 
         # print('Hash Sanity Check-%s: %s' % (
         #     self.uid, hashlib.sha1(

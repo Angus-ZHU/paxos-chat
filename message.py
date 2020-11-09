@@ -1,5 +1,5 @@
 import jsonpickle
-from typing import List, Dict
+from typing import Dict
 
 
 class BaseMessage(object):
@@ -22,10 +22,9 @@ class HeartBeat(BaseMessage):
 
 
 class Operation(BaseMessage):
-    def __init__(self, uid=None, message=None, client_address=None):
+    def __init__(self, uid=None, message=None):
         self.uid = uid
         self.message = message
-        self.client_address = client_address
 
     def if_nop(self):
         return self.uid is None
@@ -48,14 +47,24 @@ class ClientReply(BaseMessage):
 
 
 class Proposal(BaseMessage):
-    def __init__(self, master_uid, slot, operation: Operation):
+    def __init__(self, master_uid, view_modulo, client_address, slot, operation: Operation):
         self.master_uid = master_uid
+        self.view_modulo = view_modulo
+        self.client_address = client_address
         self.slot = slot
         self.operation = operation
 
-    def __eq__(self, other):
-        return type(self) == type(other) and \
-               self.operation == other.operation
+    def can_be_replaced_by(self, other):
+        if type(self) != type(other):
+            return False
+        if other.view_modulo > self.view_modulo:
+            return True
+        elif other.view_modulo == self.view_modulo:
+            if other.master_uid > self.master_uid:
+                return True
+            elif other.master_uid == self.master_uid and other.operation == self.operation:
+                return True
+        return False
 
 
 class Accept(BaseMessage):
@@ -71,7 +80,7 @@ class IAmLeader(BaseMessage):
 
 
 class YouAreLeader(BaseMessage):
-    def __init__(self, follower_uid, learned: Dict[int, Operation]):
+    def __init__(self, follower_uid, learned: Dict[int, Proposal]):
         self.follower_uid = follower_uid
         self.learned = learned
 
