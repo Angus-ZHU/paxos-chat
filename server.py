@@ -18,6 +18,7 @@ def propose_worker_wrapper(func):
         p.join(self.get_default_timeout())
         if p.is_alive():
             p.terminate()
+            self.message_queues[proposal.slot].close()
             self.result_queue.put((proposal, False))
 
     @wraps(func)
@@ -95,6 +96,7 @@ class Server(object):
             new_uid = message_queue.get()
             if new_uid not in accepted_uid:
                 accepted_uid.append(new_uid)
+        message_queue.close()
         delivered_proposals = self.state.learn_operation(proposal.slot, proposal.operation)
         for proposal in delivered_proposals:
             self.result_queue.put((proposal, True))
@@ -110,7 +112,10 @@ class Server(object):
             new_queue = Queue()
             self.message_queues[accept.proposal.slot] = new_queue
         queue = self.message_queues[accept.proposal.slot]
-        queue.put(accept.uid)
+        try:
+            queue.put(accept.uid)
+        except:
+            pass
 
     def reply_heartbeat(self, address):
         heartbeat = HeartBeat(self.uid, need_reply=False)
@@ -121,7 +126,7 @@ class Server(object):
         proposal = Proposal(self.uid, slot, message.operation)
         # create new queue
         if slot not in self.message_queues:
-            new_queue = self.manager.Queue()
+            new_queue = Queue()
             self.message_queues[slot] = new_queue
         self.propose_worker(proposal)
 
@@ -157,6 +162,7 @@ class Server(object):
             new_uid = message_queue.get()
             if new_uid not in accepted_uid:
                 accepted_uid.append(new_uid)
+        message_queue.close()
         self.state.learn_operation(proposal.slot, proposal.operation)
 
     def handle_proposal(self, proposal: Proposal):

@@ -31,6 +31,7 @@ class ServerState(object):
 
         self.manager = Manager()
         self.lock = self.manager.Lock()
+        self.lock_count = 0
         # {slot: Operation}
         self.delivered_operations = self.manager.dict()
         self.learned_operation_buffer = self.manager.dict()
@@ -43,6 +44,16 @@ class ServerState(object):
         else:
             self.skip_slots = skip_slots
 
+    def acquire_lock(self):
+        if self.lock_count == 0:
+            self.lock.acquire()
+        self.lock_count += 1
+
+    def release_lock(self):
+        self.lock_count -= 1
+        if self.lock_count == 0:
+            self.lock.release()
+
     def update_master_state(self, master_uid=None):
         if master_uid is not None:
             self.master_uid = master_uid
@@ -51,33 +62,26 @@ class ServerState(object):
         else:
             self.is_master = False
 
-    # def get_learned_operation(self, i):
-    #     if i in self.delivered_operations:
-    #         return self.delivered_operations[i]
-    #     elif i in self.learned_operation_buffer:
-    #         return self.learned_operation_buffer[i]
-    #     else:
-    #         return None
-
     @write_show_state
     def update_new_state(self, accepted: Dict[int, Operation]):
-        self.lock.acquire()
+        self.acquire_lock()
         self.accepted_operation_buffer.clear()
         self.learned_operation_buffer.clear()
         self.learned_operation_buffer.update(accepted)
-        result = self.execute(lock_acquired=True)
-        self.lock.release()
+        result = self.execute()
+        self.release_lock()
         return result
 
     def get_all_learned_operations(self) -> Dict[int, Operation]:
+        self.acquire_lock()
         result = self.delivered_operations.copy()
         result.update(self.learned_operation_buffer.copy())
+        self.release_lock()
         return result
 
-    def execute(self, lock_acquired=False):
+    def execute(self):
         result = []
-        if not lock_acquired:
-            self.lock.acquire()
+        self.acquire_lock()
         k = -1
         while True:
             k += 1
@@ -92,40 +96,41 @@ class ServerState(object):
                 result.append(proposal)
             else:
                 break
-
-        if not lock_acquired:
-            self.lock.release()
+        self.release_lock()
         return result
 
     def can_accept_operation(self, slot):
-        return slot not in self.delivered_operations and \
-               slot not in self.learned_operation_buffer and \
-               slot not in self.accepted_operation_buffer and \
-               slot not in self.skip_slots
+        self.acquire_lock()
+        can = slot not in self.delivered_operations and \
+              slot not in self.learned_operation_buffer and \
+              slot not in self.accepted_operation_buffer and \
+              slot not in self.skip_slots
+        self.release_lock()
+        return can
 
     def propose_operation(self, operation: Operation):
-        self.lock.acquire()
+        self.acquire_lock()
         slot = self.get_next_available_slot()
         self.accepted_operation_buffer[slot] = operation
-        self.lock.release()
+        self.release_lock()
         return slot
 
     def accept_operation(self, slot, operation: Operation):
-        self.lock.acquire()
+        self.acquire_lock()
         if self.can_accept_operation(slot):
             self.accepted_operation_buffer[slot] = operation
         else:
             sys.stderr.write('Fatal: accepting operation with conflicting slot')
-        self.lock.release()
+        self.release_lock()
 
     @write_show_state
     def learn_operation(self, slot, operation: Operation):
         if slot in self.accepted_operation_buffer and self.accepted_operation_buffer[slot] == operation:
-            self.lock.acquire()
+            self.acquire_lock()
             self.accepted_operation_buffer.pop(slot, 'None')
             self.learned_operation_buffer[slot] = operation
-            result = self.execute(lock_acquired=True)
-            self.lock.release()
+            result = self.execute()
+            self.release_lock()
             return result
         else:
             sys.stderr.write('Fatal: can not learn a not accepted operation\n')
@@ -144,7 +149,7 @@ class ServerState(object):
     #         f.write(jsonpickle.encode(self))
 
     def digest_state(self):
-        print("Sanity Check: %s" % self.get_all_learned_operations())
+        print("Server-%s: Sanity Check: %s" % (self.uid, self.get_all_learned_operations()))
 
         # print('Hash Sanity Check-%s: %s' % (
         #     self.uid, hashlib.sha1(
