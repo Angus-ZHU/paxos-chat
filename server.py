@@ -1,13 +1,29 @@
 import argparse
 import random
 import socket
+import time
 from functools import wraps
+from typing import Type
 from config import ServerClusterConfig
 from multiprocessing import Pool, Queue, Process, Manager
 from message import *
+from error import *
 from server_state import ServerState
 
 MAX_PACKAGE_LENGTH = 4096
+
+
+def follow_new_master_wrapper(func):
+    @wraps(func)
+    def wrap(self, *args, **kwargs):
+        try:
+            func(self, *args, **kwargs)
+        except FollowNewMasterError as e:
+            self.follow_new_master(e.master_uid, e.view_modulo)
+        except DeadMasterError:
+            self.promote_to_master()
+
+    return wrap
 
 
 def propose_worker_wrapper(func):
@@ -31,15 +47,16 @@ def propose_worker_wrapper(func):
 
 
 class Server(object):
-    def __init__(self, uid, config: ServerClusterConfig, view_modulo=0, skip_slots=None):
+    def __init__(self, uid, config: ServerClusterConfig, skip_slots=None):
         self.uid = uid
         self.config = config
-        self.view_modulo = view_modulo
 
         self.state = ServerState(self.uid, skip_slots=skip_slots)
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(config.get_address(uid))
+
+        self.message_buffer = []
 
         self.manager = Manager()
         self.message_queues = {}
@@ -74,12 +91,35 @@ class Server(object):
         for address in self.get_addresses():
             self._send(address, msg)
 
-    def _receive(self):
-        message = None
-        while message is None:
-            raw, address = self.socket.recvfrom(MAX_PACKAGE_LENGTH)
-            message = jsonpickle.decode(raw.decode("utf-8"))
+    def _receive_from_socket(self):
+        raw, address = self.socket.recvfrom(MAX_PACKAGE_LENGTH)
+        message = jsonpickle.decode(raw.decode("utf-8"))
         return message, address
+
+    def receive(self):
+        if len(self.message_buffer):
+            return self.message_buffer.pop(0)
+        return self._receive_from_socket()
+
+    def _receive_with_timeout(self, expecting: Type[BaseMessage] = None):
+        while len(self.message_buffer):
+            message, address = self.message_buffer.pop(0)
+            if expecting is None or isinstance(message, expecting):
+                return message, address
+        self.socket.settimeout(self.get_default_timeout())
+        try:
+            while True:
+                message, address = self._receive_from_socket()
+                if expecting is None or isinstance(message, expecting):
+                    return message, address
+                else:
+                    print("expecting: ", expecting)
+                    print("append to buffer %s", message)
+                    self.message_buffer.append((message, address))
+        except Exception as e:
+            raise e
+        finally:
+            self.socket.settimeout(None)
 
     def dispatcher(self):
         if self.state.is_master:
@@ -132,19 +172,13 @@ class Server(object):
 
     def master_dispatcher(self):
         while True:
-            message, address = self._receive()
+            message, address = self.receive()
             if isinstance(message, ClientRequest):
                 # print("get client request")
                 message.operation.client_address = address
                 self.handle_client_request(message)
             elif isinstance(message, Accept):
                 self.handle_accept(message)
-            elif isinstance(message, IAmLeader):
-                # todo:
-                pass
-            elif isinstance(message, InitMessage):
-                # todo:
-                pass
             elif isinstance(message, HeartBeat):
                 if message.need_reply:
                     self.reply_heartbeat(address)
@@ -158,7 +192,8 @@ class Server(object):
     def replica_learner(self, proposal: Proposal):
         message_queue = self.message_queues[proposal.slot]
         accepted_uid = []
-        while len(accepted_uid) < self.get_f():
+        # with the proposal and self, it only need f-1 other accept messages
+        while len(accepted_uid) < self.get_f() - 1:
             new_uid = message_queue.get()
             if new_uid not in accepted_uid:
                 accepted_uid.append(new_uid)
@@ -176,23 +211,99 @@ class Server(object):
                 p = Process(target=self.replica_learner, args=(proposal,))
                 p.start()
 
+    def check_master_alive(self):
+        heartbeat = HeartBeat(self.uid, need_reply=True)
+        self.send_one(self.get_master_address(), heartbeat)
+        try:
+            self._receive_with_timeout(HeartBeat)
+        except socket.timeout:
+            return False
+        return True
+
+    def can_follow_new_leader(self, new_master_uid, new_master_view_modulo):
+        return new_master_uid > self.state.master_uid or new_master_view_modulo > self.state.view_modulo
+
+    def propose_any_learned_operations(self):
+        all_learned_operations = self.state.get_all_learned_operations()
+        # fill in no-ops
+        slot = 0
+        while len(all_learned_operations):
+            if slot in all_learned_operations:
+                all_learned_operations.pop(slot)
+            else:
+                self.state.learn_operation(slot, Operation())
+            slot += 1
+        all_learned_operations = self.state.get_all_learned_operations()
+        # print("here, ", all_learned_operations)
+        for slot in all_learned_operations:
+            proposal = Proposal(self.uid, slot, all_learned_operations[slot])
+            self.send_all(proposal)
+
+    def promote_to_master(self):
+        if self.uid < self.state.master_uid:
+            self.state.update_master_state(self.uid, self.state.view_modulo + 1)
+        else:
+            self.state.update_master_state(self.uid)
+        leader_message = IAmLeader(self.uid, self.state.view_modulo)
+        self.send_all(leader_message)
+        learned_message = {}
+        follow_uid = []
+        while len(follow_uid) < self.get_f():
+            try:
+                message, _ = self._receive_with_timeout(YouAreLeader)
+            except socket.timeout:
+                print("promote to master failed")
+                self.state.is_master = False
+                self.main()
+                exit()
+            if message.follower_uid not in follow_uid:
+                print("get a follower ", message.follower_uid)
+                # json do not allow int key
+                new_learned = {}
+                for slot in message.learned:
+                    new_learned[int(slot)] = message.learned[slot]
+                follow_uid.append(message.follower_uid)
+                learned_message.update(new_learned)
+        # become master
+        self.state.update_new_state(learned_message)
+        self.main()
+        return
+
+    def follow_new_master(self, master_uid, view_modulo):
+        print("current master %s, view %s" % (self.state.master_uid, self.state.view_modulo))
+        print("following new master %s, view %s" % (master_uid, view_modulo))
+        self.state.update_master_state(master_uid, view_modulo)
+        learned_operations = self.state.get_all_learned_operations()
+        you_are_leader = YouAreLeader(self.uid, learned_operations)
+        self.send_one(self.config.get_address(master_uid), you_are_leader)
+        # time.sleep(self.get_default_timeout())
+        self.main()
+
     def replica_dispatcher(self):
         while True:
-            message, address = self._receive()
+            try:
+                message, address = self._receive_with_timeout()
+            except socket.timeout:
+                if self.check_master_alive():
+                    continue
+                else:
+                    raise DeadMasterError()
             if isinstance(message, Proposal):
                 self.handle_proposal(message)
             if isinstance(message, Accept):
                 self.handle_accept(message)
-            elif isinstance(message, InitMessage):
-                # todo
-                pass
+            if isinstance(message, IAmLeader):
+                if self.can_follow_new_leader(message.uid, message.view_modulo):
+                    raise FollowNewMasterError(message.uid, message.view_modulo)
 
     def replica_main(self):
         self.replica_dispatcher()
 
+    @follow_new_master_wrapper
     def main(self):
         if self.state.is_master:
             print("master")
+            self.propose_any_learned_operations()
             self.master_main()
         else:
             print("replica")
@@ -209,5 +320,8 @@ if __name__ == '__main__':
     # either this is the original master or the skip_slots is None
     assert args.uid == 0 or args.skip_slots is None
     config = ServerClusterConfig.read_config(args.c)
+    if args.skip_slots is not None:
+        args.skip_slots = args.skip_slots.split(',')
+        args.skip_slots = [int(slot) for slot in args.skip_slots]
     server = Server(args.uid, config, skip_slots=args.skip_slots)
     server.main()

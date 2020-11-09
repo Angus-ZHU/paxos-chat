@@ -14,7 +14,8 @@ MAX_PACKAGE_LENGTH = 4096
 
 class Client(object):
 
-    def __init__(self, config: ServerClusterConfig, timeout=1.0, message_loss=0.0):
+    def __init__(self, config: ServerClusterConfig, timeout=1.0, message_loss=0.0, manual=False):
+        self.manual = manual
         self.message_loss = message_loss
         self.timeout = timeout
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -41,9 +42,7 @@ class Client(object):
         assert isinstance(message, ClientReply)
         return message
 
-    def worker(self):
-        uid = secrets.token_hex(16)
-        body = secrets.token_urlsafe(16)
+    def worker(self, uid, body):
         print("requesting message: {uid: %s, message: %s}" % (uid, body))
         operation = Operation(uid, body)
         request = ClientRequest(operation)
@@ -56,11 +55,21 @@ class Client(object):
             else:
                 print("message send failed")
         else:
-            sys.stderr.write("Error: Client receiving random reply")
+            reason = ""
+            if self.socket.getsockname()[1] != reply.operation.client_address[1]:
+                reason = "address mismatch"
+            if operation.uid != reply.operation.uid:
+                reason = "uid mismatch"
+            sys.stderr.write("Error: Client receiving random reply: %s" % reason)
 
     def main(self):
         while True:
-            p = Process(target=self.worker)
+            uid = secrets.token_hex(16)
+            if self.manual:
+                body = input("Give me the message!\n")
+            else:
+                body = secrets.token_urlsafe(16)
+            p = Process(target=self.worker, args=(uid, body))
             p.start()
             p.join(self.timeout)
             if p.is_alive():
@@ -72,14 +81,10 @@ parser = argparse.ArgumentParser(description='Start a new client')
 parser.add_argument('-c', default='config.json', type=str, help='the config filename')
 parser.add_argument('-loss', default=0.0, type=float, help='random percentage to loss message')
 parser.add_argument('-timeout', default=5, type=float, help='timeout in seconds')
-
+parser.add_argument('-manual', action='store_true', help='manually input message')
 
 if __name__ == '__main__':
     args = parser.parse_args()
     config = ServerClusterConfig.read_config(args.c)
-    client = Client(config, args.timeout, args.loss)
+    client = Client(config, args.timeout, args.loss, manual=args.manual)
     client.main()
-
-
-
-

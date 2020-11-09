@@ -54,27 +54,30 @@ class ServerState(object):
         if self.lock_count == 0:
             self.lock.release()
 
-    def update_master_state(self, master_uid=None):
+    def update_master_state(self, master_uid=None, new_modulo=None):
         if master_uid is not None:
             self.master_uid = master_uid
+        if new_modulo is not None:
+            self.view_modulo = new_modulo
         if self.uid == self.master_uid:
             self.is_master = True
         else:
             self.is_master = False
 
     @write_show_state
-    def update_new_state(self, accepted: Dict[int, Operation]):
+    def update_new_state(self, learned: Dict[int, Operation]):
         self.acquire_lock()
         self.accepted_operation_buffer.clear()
         self.learned_operation_buffer.clear()
-        self.learned_operation_buffer.update(accepted)
+        self.learned_operation_buffer.update(learned)
         result = self.execute()
         self.release_lock()
         return result
 
     def get_all_learned_operations(self) -> Dict[int, Operation]:
         self.acquire_lock()
-        result = self.delivered_operations.copy()
+        result = {}
+        result.update(self.delivered_operations.copy())
         result.update(self.learned_operation_buffer.copy())
         self.release_lock()
         return result
@@ -125,15 +128,21 @@ class ServerState(object):
 
     @write_show_state
     def learn_operation(self, slot, operation: Operation):
-        if slot in self.accepted_operation_buffer and self.accepted_operation_buffer[slot] == operation:
-            self.acquire_lock()
-            self.accepted_operation_buffer.pop(slot, 'None')
-            self.learned_operation_buffer[slot] = operation
-            result = self.execute()
-            self.release_lock()
-            return result
-        else:
-            sys.stderr.write('Fatal: can not learn a not accepted operation\n')
+        self.acquire_lock()
+        self.accepted_operation_buffer.pop(slot, 'None')
+        self.learned_operation_buffer[slot] = operation
+        result = self.execute()
+        self.release_lock()
+        return result
+        # if slot in self.accepted_operation_buffer and self.accepted_operation_buffer[slot] == operation:
+        #     self.acquire_lock()
+        #     self.accepted_operation_buffer.pop(slot, 'None')
+        #     self.learned_operation_buffer[slot] = operation
+        #     result = self.execute()
+        #     self.release_lock()
+        #     return result
+        # else:
+        #     sys.stderr.write('Fatal: can not learn a not accepted operation\n')
 
     def get_next_available_slot(self):
         i = 0

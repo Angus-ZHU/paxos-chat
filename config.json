@@ -1,6 +1,6 @@
 {
   "py/object": "config.ServerClusterConfig",
-  "f": 2,
+  "f": 1,
   "timeout": 0.5,
   "servers_config": [
     {
@@ -25,22 +25,6 @@
       "ip": "localhost",
       "port": 23335,
       "heartbeat_port": 24335,
-      "message_loss": 0
-    },
-    {
-      "py/object": "config.ServerConfig",
-      "uid": 3,
-      "ip": "localhost",
-      "port": 23336,
-      "heartbeat_port": 24336,
-      "message_loss": 0
-    },
-    {
-      "py/object": "config.ServerConfig",
-      "uid": 4,
-      "ip": "localhost",
-      "port": 23337,
-      "heartbeat_port": 24337,
       "message_loss": 0
     }
   ]

@@ -5,10 +5,10 @@ from multiprocessing import Process
 from config import ServerClusterConfig
 
 parser = argparse.ArgumentParser(description='Script mode to run the cluster')
-parser.add_argument('-f', default=2, type=int, help='number of tolerating failures')
+parser.add_argument('-f', default=1, type=int, help='number of tolerating failures')
 parser.add_argument('-c', default='config.json', type=str, help='the config filename')
 parser.add_argument('-skip_slots', default=None, type=str, help='skip slots in the form of 1,2,3,4')
-parser.add_argument('-client_n', default=2, type=int, help='number of clients')
+parser.add_argument('-client_n', default=10, type=int, help='number of clients')
 parser.add_argument('-client_timeout', default=10, type=int, help='number of clients')
 parser.add_argument('-client_loss', default=0, type=int, help='client message loss rate')
 

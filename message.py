@@ -71,9 +71,9 @@ class IAmLeader(BaseMessage):
 
 
 class YouAreLeader(BaseMessage):
-    def __init__(self, follower_uid, accepted: Dict[int, Operation]):
+    def __init__(self, follower_uid, learned: Dict[int, Operation]):
         self.follower_uid = follower_uid
-        self.accepted = accepted
+        self.learned = learned
 
 
 class InitMessage(BaseMessage):
