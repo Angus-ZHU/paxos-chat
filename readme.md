@@ -1,5 +1,10 @@
 # Multi-Paxos-Chat
 
+## Dependency
++ python 3.7
++ jsonpickle 1.4.1
+    + This is needed for easy serialize and deserialize between python object and json string
+
 ## Components
 
 ### config.py & generate_test_config.py
