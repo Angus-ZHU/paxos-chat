@@ -1,6 +1,6 @@
-##Multi-Paxos-Chat
+## Multi-Paxos-Chat
 
-####Config Generation
+#### Config Generation
 
 Before running this system, you could run `generate_test_config.py ` to generate server's config(including server's port, id, heartbeat port, etc.) by setting the tolerate failures and output config's file name. Run `python generate_test_config.py -h` for detailed instructions to use. We've already generate the default config file `config.json`, which includes `5` random generated servers' config by setting `f = 2`.  
 
@@ -10,13 +10,13 @@ This script mode includes the above config generation step by setting `f` and `c
 
 Run `python run.py -h` for instructions to use this script mode and description of each parameter. by default, we will use `-f 2 -c config.json -skip_slots None -client_n 10 -client_timeout 10 -client_loss 0` to run this mode. Using these parameters above, we will launch 10 client process which will send messages to master constantly and 5 servers which will handle the requests from clients. You can check replica's log consistency by checking the output sanity-check hash value or read each server's log file and compare them. 
 
-####Manual Mode *recommend
+#### Manual Mode *recommend
 
 After running the config generation, our manual mode will let servers and clients read the generated config file. By launch a server, open a new terminal tab and run `server.py` . You could follow the instructions by running `server.py -h`. Running a client will also follow these steps by changing `server.py` to `client.py`. 
 
 Here is an example to go through the manual mode for better testing. After generating config file `config.json` using`-f 1 -c config.json` . We run `python server.py -uid 0`,  `python server.py -uid 1`, and `python server.py -uid 2` in 3 different tabs in terminal(which will read `config.json` by default). Now you could see the master is already elected. Then we run `python client.py` . To launch a client process and it will constantly send messages to masters after receiving message. By inspecting each of these processes' log, you could easily test the behaviors.
 
-####Test Cases
+#### Test Cases
 
 1.  Normal operation
 
