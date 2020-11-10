@@ -56,8 +56,6 @@ class Server(object):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(config.get_address(uid))
 
-        self.message_buffer = []
-
         self.manager = Manager()
         self.message_queues = {}
         self.result_queue = self.manager.Queue()
@@ -71,14 +69,11 @@ class Server(object):
     def get_master_address(self):
         return self.config.get_address(self.state.master_uid)
 
-    def get_message_loss(self):
-        return self.config.get_message_loss(self.uid)
-
     def get_addresses(self):
         return self.config.get_all_replica_ip_port(self_uid=self.uid)
 
     def _send(self, address, byte: bytes):
-        if random.uniform(0, 1) < self.get_message_loss():
+        if not self.state.is_master and random.uniform(0, 1) < self.config.message_loss:
             # message loss
             return
         self.socket.sendto(byte, address)
@@ -97,15 +92,9 @@ class Server(object):
         return message, address
 
     def receive(self):
-        if len(self.message_buffer):
-            return self.message_buffer.pop(0)
         return self._receive_from_socket()
 
     def _receive_with_timeout(self, expecting: Type[BaseMessage] = None):
-        while len(self.message_buffer):
-            message, address = self.message_buffer.pop(0)
-            if expecting is None or isinstance(message, expecting):
-                return message, address
         self.socket.settimeout(self.get_default_timeout())
         try:
             while True:
@@ -113,9 +102,7 @@ class Server(object):
                 if expecting is None or isinstance(message, expecting):
                     return message, address
                 else:
-                    print("expecting: ", expecting)
-                    print("append to buffer %s", message)
-                    self.message_buffer.append((message, address))
+                    pass
         except Exception as e:
             raise e
         finally:
@@ -176,7 +163,8 @@ class Server(object):
                 # print("get client request")
                 self.handle_client_request(message, address)
             elif isinstance(message, Accept):
-                self.handle_accept(message)
+                if message.proposal.master_uid == self.uid:
+                    self.handle_accept(message)
             elif isinstance(message, HeartBeat):
                 if message.need_reply:
                     self.reply_heartbeat(address)
@@ -208,9 +196,15 @@ class Server(object):
                 p = Process(target=self.replica_learner, args=(proposal,))
                 p.start()
 
-    def check_master_alive(self):
-        heartbeat = HeartBeat(self.uid, need_reply=True)
-        self.send_one(self.get_master_address(), heartbeat)
+    def check_master_alive(self, retry=3):
+        if self.uid == self.state.master_uid:
+            # check master alive is only called by replica, this is cause by failed promotion
+            # should be considered the same as the master is dead
+            return False
+        # because of message loss, need multiple heartbeat
+        for _ in range(retry):
+            heartbeat = HeartBeat(self.uid, need_reply=True)
+            self.send_one(self.get_master_address(), heartbeat)
         try:
             self._receive_with_timeout(HeartBeat)
         except socket.timeout:
@@ -248,7 +242,13 @@ class Server(object):
         follow_uid = []
         while len(follow_uid) < self.get_f():
             try:
-                message, _ = self._receive_with_timeout(YouAreLeader)
+                while True:
+                    message, _ = self._receive_with_timeout()
+                    if isinstance(message, YouAreLeader):
+                        break
+                    elif isinstance(message, IAmLeader):
+                        if self.can_follow_new_leader(message.uid, message.view_modulo):
+                            self.follow_new_master(message.uid, message.view_modulo)
             except socket.timeout:
                 print("promote to master failed")
                 self.state.is_master = False
@@ -268,8 +268,9 @@ class Server(object):
         return
 
     def follow_new_master(self, master_uid, view_modulo):
-        print("current master %s, view %s" % (self.state.master_uid, self.state.view_modulo))
-        print("following new master %s, view %s" % (master_uid, view_modulo))
+        print("current master %s, view %s." % (self.state.master_uid, self.state.view_modulo),
+              " following new master %s, view %s" % (master_uid, view_modulo))
+        print()
         self.state.update_master_state(master_uid, view_modulo)
         learned_proposals = self.state.get_all_learned_proposals()
         you_are_leader = YouAreLeader(self.uid, learned_proposals)
@@ -305,6 +306,7 @@ class Server(object):
             self.master_main()
         else:
             print("replica")
+            print("current master %s, view %s " % (self.state.master_uid, self.state.view_modulo))
             self.replica_main()
 
 

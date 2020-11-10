@@ -3,19 +3,18 @@ from typing import List
 
 
 class ServerConfig(object):
-    def __init__(self, uid, ip, port, heartbeat_port, message_loss=0):
+    def __init__(self, uid, ip, port):
         self.uid = uid
         self.ip = ip
         self.port = port
-        self.heartbeat_port = heartbeat_port
-        self.message_loss = message_loss
 
 
 class ServerClusterConfig(object):
     def __init__(self, f,
                  servers_config: List[ServerConfig],
-                 timeout=0.5):
+                 timeout=0.5, message_loss=0):
         self.f = f
+        self.message_loss = message_loss
         # timeout in seconds
         self.timeout = timeout
         self.servers_config = servers_config
@@ -32,14 +31,6 @@ class ServerClusterConfig(object):
         config = self.servers_config[uid]
         return config.ip, config.port
 
-    def get_heartbeat_address(self, uid):
-        config = self.servers_config[uid]
-        return config.ip, config.heartbeat_port
-
-    def get_message_loss(self, uid):
-        config = self.servers_config[uid]
-        return config.message_loss
-
     def get_all_replica_ip_port(self, self_uid=None):
         result = []
         for config in self.servers_config:
@@ -53,11 +44,12 @@ class ServerClusterConfig(object):
         return jsonpickle.decode(open(config_file).read())
 
     @classmethod
-    def generate_test_config(cls, f, config_file='config.json'):
+    def generate_test_config(cls, f, config_file='config.json', timeout=0.5, message_loss=0):
         ip = 'localhost'
         servers_config = []
         for i in range(2 * f + 1):
-            c = ServerConfig(uid=i, ip=ip, port=i + 23333, heartbeat_port=i + 24333)
+            c = ServerConfig(uid=i, ip=ip, port=i + 23333)
             servers_config.append(c)
-        cluster_config = ServerClusterConfig(f=f, servers_config=servers_config)
+        cluster_config = ServerClusterConfig(f=f, servers_config=servers_config,
+                                             timeout=timeout, message_loss=message_loss)
         cluster_config.write_config(config_file)

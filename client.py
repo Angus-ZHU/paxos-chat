@@ -50,7 +50,6 @@ class Client(object):
         while True:
             print("waiting for reply")
             reply = self._receive()
-            # print(reply)
             if operation == reply.operation:
                 if reply.success:
                     print("message send success")
@@ -80,12 +79,11 @@ class Client(object):
 
 parser = argparse.ArgumentParser(description='Start a new client')
 parser.add_argument('-c', default='config.json', type=str, help='the config filename')
-parser.add_argument('-loss', default=0.0, type=float, help='random percentage to loss message')
 parser.add_argument('-timeout', default=5, type=float, help='timeout in seconds')
 parser.add_argument('-manual', action='store_true', help='manually input message')
 
 if __name__ == '__main__':
     args = parser.parse_args()
     config = ServerClusterConfig.read_config(args.c)
-    client = Client(config, args.timeout, args.loss, manual=args.manual)
+    client = Client(config, args.timeout, config.timeout, manual=args.manual)
     client.main()
