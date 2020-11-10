@@ -85,9 +85,3 @@ class YouAreLeader(BaseMessage):
         self.learned = learned
 
 
-class InitMessage(BaseMessage):
-    def __init__(self, uid, view_modulo, accepted: Dict[int, Operation]):
-        self.uid = uid
-        self.view_modulo = view_modulo
-        self.accepted = accepted
-
